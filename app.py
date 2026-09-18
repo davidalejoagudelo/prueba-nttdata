@@ -12,7 +12,6 @@ o en la variable de entorno GEMINI_API_KEY. Nunca la escribas en este archivo ni
 Requiere en la misma carpeta (o en DATA_DIR) el archivo generado por el notebook:
     coffee_balance_long.parquet
 """
-import os
 from pathlib import Path
 
 import altair as alt
@@ -20,8 +19,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-DATA_DIR = Path(__file__).resolve().parent / "data"
-RUTA = DATA_DIR / "coffee_balance_long.parquet"
+import config
+
+DATA_DIR = config.DATA_DIR
+RUTA = config.RUTA_BALANCE
 
 VERDE, ROJO, AZUL, OCRE, GRIS = "#3F7A4A", "#A3243B", "#2D4F7C", "#9A6A12", "#8A958F"
 SEG_LABEL = {
@@ -94,27 +95,32 @@ st.sidebar.title("High Garden Coffee")
 st.sidebar.caption("Productores de café que se están volviendo mercados de destino")
 vista = st.sidebar.radio("Sección", [
     "Resumen", "Explorar un país", "Consultar con IA 🤖",
-    "1 · Negocio ✅", "2 · Datos ✅", "3 · Preparación ✅",
-    "4 · Modelado ⏳", "5 · Evaluación ⏳", "6 · Despliegue ⏳",
+    "1 · Negocio", "2 · Datos", "3 · Preparación",
+    "4 · Modelado", "5 · Evaluación", "6 · Despliegue",
 ])
+
+
+@st.cache_data
+def cargar_modelado() -> dict | None:
+    """Artefactos que exporta el notebook 4. Si faltan, las fases 4 y 5 muestran solo el diseño."""
+    if not all(p.exists() for p in config.ARTEFACTOS_MODELADO.values()):
+        return None
+    return {n: pd.read_parquet(p) for n, p in config.ARTEFACTOS_MODELADO.items()}
+
+
+modelado = cargar_modelado()
 
 
 
 # ---------------------------------------------------------------- asistente IA: clave y cliente
-def clave_por_defecto() -> str:
-    try:
-        return st.secrets.get("GEMINI_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")
-    except Exception:  # no existe secrets.toml
-        return os.environ.get("GEMINI_API_KEY", "")
-
-
-MODELOS_POR_DEFECTO = ["gemini-3.5-flash", "gemini-3.1-flash-lite"]
-
 if IA_DISPONIBLE:
-    st.session_state.setdefault("api_key", clave_por_defecto())
+    MODELOS_POR_DEFECTO = ia.MODELOS_PREFERIDOS
+    st.session_state.setdefault("api_key", config.obtener_api_key())
     with st.sidebar.expander("🔑 Asistente IA (Gemini)"):
+        st.caption(f"Clave detectada en: **{config.origen_api_key()}**")
         st.text_input("API key de Google AI Studio", type="password", key="api_key",
-                      help="Se guarda solo en la memoria de esta sesión; no se escribe en disco.")
+                      help="Se guarda solo en la memoria de esta sesión. Para no pegarla cada vez, "
+                           "ponla en el archivo .env (ignorado por git) o en los secrets de Streamlit.")
         opciones = st.session_state.get("modelos") or MODELOS_POR_DEFECTO
         st.selectbox("Modelo", opciones, key="modelo")
         st.caption("Plan gratuito: mientras no actives la facturación en AI Studio, no hay cobros. "
@@ -389,23 +395,115 @@ elif vista.startswith("3"):
         color=alt.Color("country:N", legend=alt.Legend(orient="top", title=None)),
     ).properties(height=320, title="El mercado interno gana peso en los grandes productores"), width="stretch")
 
-# ---------------------------------------------------------------- fases pendientes
+# ---------------------------------------------------------------- fase 4
 elif vista.startswith("4"):
     st.title("Fase 4 · Modelado")
-    st.info("Diseño propuesto, pendiente de implementar.")
-    st.dataframe(pd.DataFrame({
-        "Candidato": ["Ingenuo", "Drift", "ETS amortiguado", "ARIMA de orden bajo con deriva", "Modelo global con lags (opcional)"],
-        "Rol": ["Línea base", "Robusto con series cortas", "Suele ganar en series anuales cortas",
-                "Coherente con series I(1)", "Aprovecha todos los países a la vez"],
-    }), hide_index=True, width="stretch")
-    st.markdown("**Backtesting con origen móvil:** orígenes 2011/12 a 2016/17, horizonte 3, selección por MASE.")
+    if modelado is None:
+        st.info("Ejecuta `notebooks/4_modelado.ipynb` para generar los artefactos de esta fase.")
+        st.stop()
+
+    st.write("Consumo y producción se proyectan por separado a 3 años cafeteros. Cada serie se queda con el modelo "
+             "que mejor pronostica en backtesting de origen móvil, y la incertidumbre sale de los errores reales "
+             "de ese backtesting.")
+
+    bt, elegidos = modelado["backtesting"], modelado["modelos"]
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Pronósticos evaluados", f"{len(bt):,}".replace(",", "."))
+    k2.metric("Series modeladas", f"{len(elegidos)}")
+    k3.metric("Escenarios por país y año", "1.000")
+
+    a, b = st.columns(2)
+    a.subheader("MASE promedio por modelo")
+    a.dataframe(bt.pivot_table(index="modelo", columns="variable", values="mase", aggfunc="mean").round(3),
+                width="stretch")
+    b.subheader("Modelo elegido por serie")
+    b.dataframe(elegidos.pivot_table(index="variable", columns="modelo", aggfunc="size", fill_value=0),
+                width="stretch")
+
+    st.subheader("MASE por horizonte")
+    por_h = bt.pivot_table(index="h", columns="modelo", values="mase", aggfunc="mean").reset_index()
+    st.altair_chart(alt.Chart(por_h.melt(id_vars="h", var_name="modelo", value_name="mase")).mark_line(
+        strokeWidth=2, point=True).encode(
+        x=alt.X("h:O", title="Años hacia adelante"),
+        y=alt.Y("mase:Q", title="MASE promedio"),
+        color=alt.Color("modelo:N", legend=alt.Legend(orient="top", title=None)),
+    ).properties(height=300), width="stretch")
+    st.caption("El error crece con el horizonte: a tres años ningún modelo es preciso, por eso el resultado "
+               "se entrega como probabilidad y no como número único.")
+
+# ---------------------------------------------------------------- fase 5
 elif vista.startswith("5"):
     st.title("Fase 5 · Evaluación")
-    st.info("Criterios definidos, pendiente de resultados.")
-    st.latex(r"\text{Prioridad} = w_1\,\text{Tamaño} + w_2\,\text{Velocidad} + w_3\,\text{Certeza}")
-    st.markdown("- **MASE** < 1 frente al ingenuo\n- **Cobertura** de intervalos del 80%\n- **Estabilidad** del ranking")
+    if modelado is None:
+        st.info("Ejecuta `notebooks/4_modelado.ipynb` y `notebooks/5_evaluacion.ipynb` para ver esta fase.")
+        st.stop()
+
+    ranking = modelado["ranking"].set_index("country")
+    calibracion = modelado["calibracion"]
+    anio = ranking["crop_year"].iloc[0]
+
+    st.subheader(f"Mercados priorizados para {anio}")
+    top = ranking.sort_values("necesidad_esperada_sacos", ascending=False).head(8).reset_index()
+    st.altair_chart(alt.Chart(top).mark_bar().encode(
+        x=alt.X("necesidad_esperada_sacos:Q", title="Necesidad esperada de importación (sacos)"),
+        y=alt.Y("country:N", sort="-x", title=None),
+        color=alt.Color("confiabilidad:N", legend=alt.Legend(orient="top", title=None),
+                        scale=alt.Scale(range=[OCRE, ROJO])),
+        tooltip=["country", "prob_deficit", "necesidad_esperada_sacos", "coffee_type"],
+    ).properties(height=320), width="stretch")
+
+    st.dataframe(top[["country", "coffee_type", "prob_deficit", "necesidad_esperada_sacos", "confiabilidad"]]
+                 .style.format({"prob_deficit": "{:.0%}", "necesidad_esperada_sacos": "{:,.0f}"}),
+                 hide_index=True, width="stretch")
+
+    st.subheader("¿Se puede confiar en esas probabilidades?")
+    brier = ((calibracion["prob_pronosticada"] - calibracion["deficit_real"]) ** 2).mean()
+    base = ((calibracion["prob_climatologica"] - calibracion["deficit_real"]) ** 2).mean()
+    relevantes = calibracion[calibracion["prob_climatologica"] > 0]
+    brier_rel = ((relevantes["prob_pronosticada"] - relevantes["deficit_real"]) ** 2).mean()
+    base_rel = ((relevantes["prob_climatologica"] - relevantes["deficit_real"]) ** 2).mean()
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Brier (todos los casos)", f"{brier:.3f}", f"línea base {base:.3f}", delta_color="off")
+    c2.metric("Brier (países con historia de déficit)", f"{brier_rel:.3f}", f"línea base {base_rel:.3f}",
+              delta_color="off")
+    c3.metric("Casos evaluados", f"{len(calibracion)}")
+
+    cortes = [0, 0.05, 0.25, 0.5, 0.75, 0.95, 1.0]
+    tabla = (calibracion.assign(rango=pd.cut(calibracion["prob_pronosticada"], cortes, include_lowest=True))
+             .groupby("rango", observed=True)
+             .agg(casos=("deficit_real", "size"), probabilidad_media=("prob_pronosticada", "mean"),
+                  frecuencia_real=("deficit_real", "mean")).reset_index())
+    tabla["rango"] = tabla["rango"].astype(str)
+    st.dataframe(tabla.style.format({"probabilidad_media": "{:.0%}", "frecuencia_real": "{:.0%}"}),
+                 hide_index=True, width="stretch")
+    st.warning("El método acierta en los extremos, pero sobreestima en la zona intermedia. "
+               "Sirve para **ordenar** mercados e identificar casos claros, no como probabilidad literal.")
+
+# ---------------------------------------------------------------- fase 6
 else:
     st.title("Fase 6 · Despliegue")
-    st.info("Pendiente.")
-    st.markdown("- Ficha por mercado priorizado.\n- Reentrenamiento anual.\n"
-                "- Asistente GenAI con herramientas que consultan la tabla y las proyecciones.")
+    st.write("Esta aplicación es el despliegue: lee los artefactos que generan los notebooks y los deja "
+             "consultables, incluida la pregunta en lenguaje natural.")
+    a, b = st.columns(2)
+    a.subheader("Cómo se ejecuta")
+    a.markdown("""
+1. `pip install -r requirements.txt`
+2. Copia `.env.example` a `.env` y pon tu `GEMINI_API_KEY` (opcional, solo para el asistente).
+3. `streamlit run app.py`
+
+Los notebooks se corren en orden 1 → 5 y regeneran todo lo que hay en `data/`.
+""")
+    b.subheader("Próxima iteración")
+    b.markdown("""
+- Modelar consumo y producción de forma conjunta para corregir la sobreestimación.
+- Recalibrar las probabilidades antes de publicarlas.
+- Incorporar exportaciones de la ICO y variables de población y PIB.
+- Reentrenamiento anual cuando la ICO publique datos nuevos.
+""")
+    st.subheader("Limitaciones que deben acompañar cualquier decisión")
+    st.markdown("""
+- **Sin precios:** el resultado dice cuánto café necesitará importar un mercado, no si venderle será rentable.
+- **Balance aparente:** no incluye existencias ni re-exportaciones.
+- **Datos hasta 2019/20:** las proyecciones no se han podido contrastar con los años posteriores.
+""")

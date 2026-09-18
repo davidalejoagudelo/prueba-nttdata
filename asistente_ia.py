@@ -27,6 +27,18 @@ import pandas as pd
 MAX_LLAMADAS_POR_SESION = 50
 NOMBRE_TABLA = "balance"
 
+# Google retira modelos con frecuencia. Orden de preferencia: la app usa el primero que la clave
+# tenga disponible, y «Probar conexión» confirma cuál responde de verdad.
+MODELOS_PREFERIDOS = [
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-flash-latest",
+]
+# Variantes que no sirven para texto
+_EXCLUIR = ("image", "tts", "live", "audio", "transcribe", "embedding", "robotics", "computer", "omni", "vision")
+
 
 # =============================================================== conexión (implementado)
 class LimiteDeLlamadas(Exception):
@@ -36,10 +48,11 @@ class LimiteDeLlamadas(Exception):
 @dataclass
 class ClienteGemini:
     api_key: str = ""
-    modelo: str = "gemini-2.5-flash"
+    modelo: str = MODELOS_PREFERIDOS[0]
     llamadas: int = 0
     limite: int = MAX_LLAMADAS_POR_SESION
     _cliente: object = field(default=None, repr=False)
+    _usar_interactions: bool = field(default=True, repr=False)
 
     def __post_init__(self):
         from google import genai
@@ -49,25 +62,60 @@ class ClienteGemini:
         """Modelos disponibles para tu clave que generan texto y son de la familia Flash."""
         nombres = []
         for m in self._cliente.models.list():
+            nombre = (m.name or "").removeprefix("models/")
             acciones = m.supported_actions or []
-            if "generateContent" in acciones and "flash" in (m.name or "").lower():
-                nombres.append(m.name.removeprefix("models/"))
-        return sorted(nombres)
+            if ("generateContent" in acciones and "flash" in nombre.lower()
+                    and not any(x in nombre.lower() for x in _EXCLUIR)):
+                nombres.append(nombre)
+        preferidos = [n for n in MODELOS_PREFERIDOS if n in nombres]
+        return preferidos + sorted(n for n in nombres if n not in preferidos)
 
-    def generar(self, prompt: str, system: str | None = None, json_mode: bool = False) -> str:
-        """Una llamada al modelo. Cuenta contra el límite de la sesión solo si tiene éxito."""
+    def _via_interactions(self, prompt: str, system: str | None, json_mode: bool) -> str:
+        """API nueva (client.interactions.create). Es la forma recomendada en los modelos recientes."""
+        cuerpo: dict = {"model": self.modelo, "input": prompt}
+        if system:
+            cuerpo["system_instruction"] = system
+        if json_mode:
+            cuerpo["response_mime_type"] = "application/json"
+        return self._cliente.interactions.create(**cuerpo).output_text or ""
+
+    def _via_generate_content(self, prompt: str, system: str | None, json_mode: bool) -> str:
+        """API clásica, como respaldo si la versión del SDK o el modelo no soportan interactions."""
         from google.genai import types
 
-        if self.llamadas >= self.limite:
-            raise LimiteDeLlamadas(f"Se alcanzó el límite de {self.limite} llamadas en esta sesión.")
         config = types.GenerateContentConfig(
             system_instruction=system,
-            temperature=0,
             response_mime_type="application/json" if json_mode else None,
         )
         respuesta = self._cliente.models.generate_content(model=self.modelo, contents=prompt, config=config)
-        self.llamadas += 1
         return respuesta.text or ""
+
+    def generar(self, prompt: str, system: str | None = None, json_mode: bool = False) -> str:
+        """
+        Una llamada al modelo. Cuenta contra el límite de la sesión solo si tiene éxito.
+        Usa la API de interactions y, si no está disponible, cae a generate_content para el
+        resto de la sesión.
+        """
+        from google.genai import errors
+
+        if self.llamadas >= self.limite:
+            raise LimiteDeLlamadas(f"Se alcanzó el límite de {self.limite} llamadas en esta sesión.")
+
+        if self._usar_interactions and hasattr(self._cliente, "interactions"):
+            try:
+                texto = self._via_interactions(prompt, system, json_mode)
+                self.llamadas += 1
+                return texto
+            except errors.APIError as e:
+                if e.code in (401, 403, 404, 429):
+                    raise            # problema de clave, modelo o cupo: no lo arregla cambiar de API
+                self._usar_interactions = False
+            except (AttributeError, TypeError):
+                self._usar_interactions = False
+
+        texto = self._via_generate_content(prompt, system, json_mode)
+        self.llamadas += 1
+        return texto
 
     def probar_conexion(self) -> str:
         """
