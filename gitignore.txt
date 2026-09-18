@@ -1,5 +1,6 @@
 # Credenciales: nunca subir al repositorio
 .env
+.env.txt
 .streamlit/secrets.toml
 *.key
 
