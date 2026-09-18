@@ -1,17 +1,3 @@
-"""
-High Garden Coffee: tablero de avance (CRISP-DM, fases 1 a 3).
-
-Ejecutar:
-    pip install "streamlit>=1.50" pandas pyarrow altair google-genai duckdb
-    streamlit run app.py
-
-Asistente IA (opcional): pega tu API key de Google AI Studio en la barra lateral.
-También puedes definirla fuera del código, en .streamlit/secrets.toml (GEMINI_API_KEY = "...")
-o en la variable de entorno GEMINI_API_KEY. Nunca la escribas en este archivo ni la subas a GitHub.
-
-Requiere en la misma carpeta (o en DATA_DIR) el archivo generado por el notebook:
-    coffee_balance_long.parquet
-"""
 from pathlib import Path
 
 import altair as alt
@@ -119,8 +105,7 @@ if IA_DISPONIBLE:
     with st.sidebar.expander("🔑 Asistente IA (Gemini)"):
         st.caption(f"Clave detectada en: **{config.origen_api_key()}**")
         st.text_input("API key de Google AI Studio", type="password", key="api_key",
-                      help="Se guarda solo en la memoria de esta sesión. Para no pegarla cada vez, "
-                           "ponla en el archivo .env (ignorado por git) o en los secrets de Streamlit.")
+                      help="Esta información no se almacena.")
         opciones = st.session_state.get("modelos") or MODELOS_POR_DEFECTO
         st.selectbox("Modelo", opciones, key="modelo")
         st.caption("Plan gratuito: mientras no actives la facturación en AI Studio, no hay cobros. "
