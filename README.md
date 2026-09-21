@@ -32,7 +32,7 @@ consultar los resultados en lenguaje natural.
 ## Ejecutar en local
 
 ```bash
-git clone <URL-DEL-REPOSITORIO>
+git clone https://github.com/davidalejoagudelo/prueba-nttdata
 cd <carpeta-del-repositorio>
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
