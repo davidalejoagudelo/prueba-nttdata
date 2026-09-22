@@ -76,7 +76,11 @@ class ClienteGemini:
         if system:
             cuerpo["system_instruction"] = system
         if json_mode:
-            cuerpo["response_mime_type"] = "application/json"
+            cuerpo["response_format"] = {
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": ESQUEMA_RESPUESTA,
+            }
         return self._cliente.interactions.create(**cuerpo).output_text or ""
 
     def _via_generate_content(self, prompt: str, system: str | None, json_mode: bool) -> str:
@@ -312,6 +316,27 @@ Usa "tipo": "linea" para series en el tiempo (eje X = anio_inicio o crop_year), 
 comparar países o categorías, y "ninguna" si el resultado es un solo número o no tiene
 sentido graficarlo.
 """
+
+ESQUEMA_RESPUESTA = {
+    "type": "object",
+    "properties": {
+        "sql": {"type": "string"},
+        "grafica": {
+            "type": "object",
+            "properties": {
+                "tipo": {"type": "string", "enum": ["linea", "barra", "ninguna"]},
+                "x": {"type": "string"},
+                "y": {"type": "string"},
+                "color": {"type": "string"},
+                "titulo": {"type": "string"},
+            },
+            "required": ["tipo", "x", "y", "color", "titulo"],
+        },
+        "fuera_de_alcance": {"type": "boolean"},
+        "motivo": {"type": "string"},
+    },
+    "required": ["sql", "grafica", "fuera_de_alcance", "motivo"],
+}
 
 EJEMPLOS = """
 Ejemplo 1
